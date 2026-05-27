@@ -1,0 +1,83 @@
+---
+title: "8 - exercise"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+Your job in this exercise is to run the same risk workflow on a ticker of your choice and report the numbers. Pick something that moves - a single stock rather than a broad ETF is fine, and it'll make the tails more interesting.
+
+### 1. Load libraries
+
+Load `tidyverse`, `tidyquant`, `PerformanceAnalytics`, and `scales`.
+
+```{r}
+#| label: load-libraries
+#| warning: false
+#| message: false
+
+
+```
+
+### 2. Grab 10 years of daily data for a single ticker
+
+Pick any ticker. Compute daily arithmetic returns.
+
+```{r}
+#| label: grab-data
+#| warning: false
+
+
+```
+
+### 3. Plot the return series
+
+Make a simple line chart of daily returns. Label your axes in percent.
+
+```{r}
+#| label: plot-returns
+
+
+```
+
+### 4. Compute historical 95% VaR, expected shortfall, and parametric VaR
+
+Produce a small tibble with all three. Assume a \$500,000 position so you can also quote dollar losses.
+
+```{r}
+#| label: var-es
+
+
+```
+
+### 5. Run a stress test
+
+Find the worst 20-day rolling return in your history. Report the end date and the dollar loss on your \$500,000 position.
+
+```{r}
+#| label: stress-test
+
+
+```
+
+### 6. Run a Monte Carlo price-path simulation
+
+10,000 paths, 252 days, normal assumption using your historical mu and sigma. Report:
+
+-   mean terminal 1-year return
+-   median terminal 1-year return
+-   5th percentile terminal 1-year return
+-   expected shortfall at 5%
+
+```{r}
+#| label: monte-carlo
+
+
+```
+
+### 7. One-paragraph interpretation
+
+Below the code, in plain English, write two or three sentences telling a non-data-scientist what the risk profile of this stock looks like based on what you found. What would you tell them before they bought \$500K of it?
+
+**ANSWER:**

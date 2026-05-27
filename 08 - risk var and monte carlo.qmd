@@ -1,0 +1,252 @@
+---
+title: "8: Risk metrics, Value-at-Risk, and Monte Carlo simulation"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+## Measuring the downside
+
+We've spent a lot of time this course talking about expected returns and volatility. Now we're going to squarely face the question every risk manager, CFO, and retired person asks: *how bad could it get?* That's what Value-at-Risk (VaR) and its cousin Expected Shortfall (ES) are trying to answer. Then we'll extend the idea into the future with a Monte Carlo simulation, which is a fancy name for "run the dice roll ten thousand times and see what happens."
+
+A reminder on language. Risk in investments isn't just "price goes up and down" - it's the probability that, when you need the money, it's not there. VaR and ES are two of the most common ways firms quantify that probability in dollar terms. Regulators require it. Boards demand it. You should know how to compute it and, more importantly, how to explain what it does and doesn't mean.
+
+### Load libraries
+
+We're going to lean on `tidyquant` again, plus `PerformanceAnalytics` for some sanity checks. `scales` is just there to make our plot axes look human.
+
+```{r}
+#| label: load-libraries
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(tidyquant)
+library(PerformanceAnalytics)
+library(timetk)
+library(scales)
+```
+
+### Grab the data
+
+Let's use SPY - the S&P 500 ETF. Ten years of daily data should give us plenty of ups and downs (including the COVID crash in early 2020 and the 2022 drawdown) to work with.
+
+```{r}
+#| label: grab-spy
+#| warning: false
+#| message: false
+
+today   <- Sys.Date()
+years10 <- today %m-% years(10)
+
+spy_prices <- tq_get("SPY",
+                     get  = "stock.prices",
+                     from = years10,
+                     to   = today)
+
+# compute daily arithmetic returns
+spy_ret <- spy_prices |>
+    arrange(date) |>
+    mutate(ret = adjusted / lag(adjusted) - 1) |>
+    drop_na(ret) |>
+    select(date, ret)
+
+spy_ret |>
+    ggplot(aes(x = date, y = ret)) +
+    geom_line(color = "steelblue") +
+    scale_y_continuous(labels = percent) +
+    labs(title = "SPY daily returns",
+         x = "", y = "") +
+    theme_minimal()
+```
+
+Notice the "volatility clusters." Calm, calm, calm, then a big spike, then more wiggles, then calm again. That's GARCH-style behavior and it's why simple historical VaR isn't the whole story - but it's a perfectly good starting point.
+
+### Historical VaR
+
+The simplest VaR answer to "how bad can one day be?" is to just look at the worst days we've actually seen. For a 95% one-day VaR, we find the 5th percentile of the return distribution. Five percent of historical days were worse than this number; 95% were better. Multiply it by your position size in dollars and you get a dollar VaR.
+
+```{r}
+#| label: historical-var
+
+conf <- 0.05  # 95% VaR
+
+var_hist <- quantile(spy_ret$ret, probs = conf) |> as.numeric()
+
+tibble(
+    metric = c("Historical 95% 1-day VaR (return)",
+               "Historical 95% 1-day VaR ($1M position)"),
+    value  = c(percent(var_hist, accuracy = 0.01),
+               dollar(var_hist * 1e6, accuracy = 1))
+)
+```
+
+So on a \$1 million SPY position, on a bad-but-not-catastrophic day (the worst 5% of days), we'd expect to lose roughly whatever that number above says. You'd quote it as a positive dollar loss when you talk to non-data-people: "We could lose \$X or more on 1 in 20 trading days."
+
+Cross-check with `PerformanceAnalytics`:
+
+```{r}
+#| label: var-check-perfanal
+#| warning: false
+
+spy_xts <- spy_ret |>
+    tk_xts(select = ret, date_var = date)
+
+VaR(spy_xts, p = 0.95, method = "historical")
+```
+
+Same ballpark, slight differences in convention (sign, exact quantile method). Good enough to trust.
+
+### Parametric VaR (normal assumption)
+
+Parametric VaR assumes returns follow a nice bell curve. That's wrong, by the way - real returns have fatter tails than a normal distribution - but it's a useful benchmark. We just need the mean, the standard deviation, and the inverse normal CDF at our chosen confidence level.
+
+```{r}
+#| label: parametric-var
+
+mu_r    <- mean(spy_ret$ret)
+sigma_r <- sd(spy_ret$ret)
+
+z_95    <- qnorm(conf)  # will be negative, ~ -1.645
+
+var_norm <- mu_r + sigma_r * z_95
+
+tibble(
+    metric = c("Parametric 95% 1-day VaR (return)",
+               "Parametric 95% 1-day VaR ($1M position)"),
+    value  = c(percent(var_norm, accuracy = 0.01),
+               dollar(var_norm * 1e6, accuracy = 1))
+)
+```
+
+Compare to historical. If they're far apart, that's telling you the normal assumption doesn't fit your data well (almost always the case for equities).
+
+### Expected Shortfall (CVaR)
+
+VaR tells you the threshold. Expected Shortfall (ES), also called CVaR or conditional VaR, tells you *how bad it gets when VaR is breached*. In regulated banks, it has largely replaced VaR as the preferred risk number because it actually cares about the tail.
+
+```{r}
+#| label: expected-shortfall
+
+es_hist <- spy_ret |>
+    filter(ret <= var_hist) |>
+    summarise(es = mean(ret)) |>
+    pull(es)
+
+tibble(
+    metric = c("Historical 95% VaR",
+               "Historical 95% Expected Shortfall"),
+    value  = c(percent(var_hist, accuracy = 0.01),
+               percent(es_hist,  accuracy = 0.01))
+)
+```
+
+ES will always be a bigger number (worse) than VaR at the same confidence level, because it averages the losses that are at or beyond VaR. If you quote VaR to your board, also quote ES. It tells the more honest story.
+
+### A simple stress test
+
+Stress testing asks, "what if the worst historical window happened again tomorrow?" We can pick our worst 20-day window historically and ask what that would do to today's position.
+
+```{r}
+#| label: stress-test
+
+rolling_20 <- spy_ret |>
+    arrange(date) |>
+    mutate(cum_20 = slider::slide_dbl(ret, ~ prod(1 + .x) - 1,
+                                      .before = 19, .complete = TRUE))
+
+worst_window <- rolling_20 |>
+    filter(!is.na(cum_20)) |>
+    slice_min(cum_20, n = 1)
+
+worst_window |>
+    mutate(loss_on_1M = dollar(cum_20 * 1e6, accuracy = 1)) |>
+    select(date, cum_20, loss_on_1M)
+```
+
+That tells you the worst rolling 20-day drawdown SPY has endured in your window, with the end date of the window. If that window repeated, here's the dollar hit. Regulators love this kind of thing because it's intuitive and historically grounded - no assumption about distributions.
+
+### Monte Carlo price path simulation
+
+Now the fun part. We're going to simulate 10,000 possible future price paths for SPY over the next 252 trading days (about a year), assuming daily returns are normally distributed with the same mean and standard deviation we observed. That's a strong assumption (as noted, real returns have fat tails), but it's a great starting point for intuition. You can later swap in a t-distribution, a bootstrap of historical returns, or a full GARCH model if you want to get fancy.
+
+```{r}
+#| label: monte-carlo-paths
+#| warning: false
+
+set.seed(42)
+
+n_sims  <- 10000
+n_days  <- 252
+S0      <- tail(spy_prices$adjusted, 1)
+
+# simulate n_sims paths of n_days daily returns
+sim_returns <- matrix(rnorm(n_sims * n_days, mean = mu_r, sd = sigma_r),
+                      nrow = n_days, ncol = n_sims)
+
+# convert to price paths (each column is one simulation)
+price_paths <- apply(sim_returns, 2, function(r) S0 * cumprod(1 + r))
+
+# terminal prices
+terminal <- price_paths[n_days, ]
+
+# annual return for each sim
+terminal_ret <- terminal / S0 - 1
+
+tibble(
+    metric = c("Mean simulated 1Y return",
+               "Median simulated 1Y return",
+               "5% worst-case 1Y return (MC VaR)",
+               "5% Expected Shortfall 1Y"),
+    value  = c(percent(mean(terminal_ret),                   accuracy = 0.1),
+               percent(median(terminal_ret),                 accuracy = 0.1),
+               percent(quantile(terminal_ret, 0.05),         accuracy = 0.1),
+               percent(mean(terminal_ret[terminal_ret <=
+                                         quantile(terminal_ret, 0.05)]),
+                       accuracy = 0.1))
+)
+```
+
+Let's visualize. Plotting all 10,000 paths is too much, so I'll sample 200 of them and also draw a fan showing the 5th, 50th, and 95th percentile of price at each day.
+
+```{r}
+#| label: monte-carlo-plot
+#| warning: false
+
+set.seed(1)
+keep <- sample(n_sims, 200)
+
+paths_long <- as_tibble(price_paths[, keep]) |>
+    mutate(day = row_number()) |>
+    pivot_longer(-day, names_to = "sim", values_to = "price")
+
+fan <- apply(price_paths, 1, quantile, probs = c(0.05, 0.50, 0.95)) |>
+    t() |>
+    as_tibble() |>
+    rename(p05 = `5%`, p50 = `50%`, p95 = `95%`) |>
+    mutate(day = row_number())
+
+ggplot() +
+    geom_line(data = paths_long, aes(x = day, y = price, group = sim),
+              alpha = 0.08, color = "steelblue") +
+    geom_line(data = fan, aes(x = day, y = p50), color = "black", linewidth = 1) +
+    geom_line(data = fan, aes(x = day, y = p05), color = "firebrick",
+              linetype = 2, linewidth = 1) +
+    geom_line(data = fan, aes(x = day, y = p95), color = "forestgreen",
+              linetype = 2, linewidth = 1) +
+    scale_y_continuous(labels = dollar) +
+    labs(title    = "SPY Monte Carlo price paths - 252 trading days",
+         subtitle = "200 sample paths; 5th/50th/95th percentile in bold",
+         x        = "Trading day",
+         y        = "Simulated price") +
+    theme_minimal()
+```
+
+The fan spreads out as time goes on - that's the square-root-of-time behavior of diffusion processes. Look at how wide the green/red band is at day 252. That's your "I have no idea" uncertainty cone for the year.
+
+### Why all of this matters
+
+A financial analyst who only talks about expected returns is only telling half the story. When you present a portfolio recommendation to your boss, your client, or your own retirement account, you want to be able to answer the next obvious question: "Okay, but how bad could it get?" Historical VaR, parametric VaR, Expected Shortfall, stress tests, and Monte Carlo simulations each answer that question from a slightly different angle. The more of them you can speak to, the more credible your recommendation.
+
+In the next lesson we'll take these risk numbers and combine them with simple performance metrics - Sharpe ratio, drawdown, a small moving-average-crossover backtest - to ask whether a simple rules-based strategy actually earns its risk.
